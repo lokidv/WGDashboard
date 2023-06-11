@@ -161,6 +161,10 @@
                             <small class="text-muted"><strong>END POINT</strong></small>
                             <h6 style="text-transform: uppercase;">{{i['endpoint']}}</h6>
                         </div>
+                        <div class="col-sm">
+                            <small class="text-muted"><strong>STATUS</strong></small>
+                            <h6 style="text-transform: uppercase;">{{i['is_enabled'] ? 'Enabled' : 'Disabled' }}</h6>
+                        </div>
                         <div class="w-100"></div>
                         <div class="col-sm"><hr><div class="button-group" style="display:flex"><button type="button" class="btn btn-outline-primary btn-setting-peer btn-control" id="{{i['id']}}" data-toggle="modal"><i class="bi bi-gear-fill"></i></button><button type="button" class="btn btn-outline-danger btn-delete-peer btn-control" id="{{i['id']}}" data-toggle="modal"><i class="bi bi-x-circle-fill"></i></button>
                                 {% if i['private_key'] %}

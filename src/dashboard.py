@@ -1,5 +1,5 @@
 """
-< WGDashboard > - Copyright(C) 2021 Donald Zou [https://github.com/donaldzou]
+< WGDashboard > - Copyright(C) 2021 Donald Zou [https://github.com/lorddeveloper]
 Under Apache-2.0 License
 """
 
@@ -18,9 +18,14 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta
+from glob import glob
 from operator import itemgetter
+from pathlib import Path
+from threading import Thread
+
 # PIP installed library
 import ifcfg
+import pytz
 from flask import Flask, request, render_template, redirect, url_for, session, jsonify, g
 from flask_qrcode import QRcode
 from icmplib import ping, traceroute
@@ -209,27 +214,45 @@ def get_latest_handshake(config_name):
 
     # Get latest handshakes
     try:
-        data_usage = subprocess.check_output(f"wg show {config_name} latest-handshakes",
-                                             shell=True, stderr=subprocess.STDOUT)
+        output = subprocess.check_output(f"wg show {config_name} latest-handshakes",
+                                         shell=True, stderr=subprocess.STDOUT).decode("UTF-8")
     except subprocess.CalledProcessError:
         return "stopped"
-    data_usage = data_usage.decode("UTF-8").split()
-    count = 0
+
+    handshakes = {}
+
+    for handshake in filter(bool, output.split("\n")):
+        (_id, _time) = handshake.split("\t")
+
+        handshakes[_id] = {
+            "id": _id,
+            "time": int(_time),
+        }
+
     now = datetime.now()
     time_delta = timedelta(minutes=2)
-    for _ in range(int(len(data_usage) / 2)):
-        minus = now - datetime.fromtimestamp(int(data_usage[count + 1]))
-        if minus < time_delta:
-            status = "running"
-        else:
-            status = "stopped"
-        if int(data_usage[count + 1]) > 0:
-            g.cur.execute("UPDATE %s SET latest_handshake = '%s', status = '%s' WHERE id='%s'"
-            % (config_name, str(minus).split(".", maxsplit=1)[0], status, data_usage[count]))
-        else:
-            g.cur.execute("UPDATE %s SET latest_handshake = '(None)', status = '%s' WHERE id='%s'"
-            % (config_name, status, data_usage[count]))
-        count += 2
+    peers = g.cur.execute(f"SELECT id, expires_at, is_connected, created_at FROM {config_name}").fetchall()
+
+    for peer in peers:
+        (key, expires_at, is_connected, created_at) = peer
+        is_connected = is_connected or 0
+        handshake = handshakes.get(key)
+
+        if handshake:
+            diff = now - datetime.fromtimestamp(int(handshake['time']))
+            status = "running" if diff < time_delta else "stopped"
+
+            if status == "running" and not bool(is_connected):
+                expires_at = int(expires_at) + time.time() - int(created_at) if expires_at else expires_at
+                is_connected = 1
+
+            if handshake['time'] > 0:
+                g.cur.execute(
+                    f"update {config_name} set latest_handshake = '%s', status = '%s', is_connected = %d, expires_at = %d where id='%s'" % (
+                        str(diff).split('.', maxsplit=1)[0], status, is_connected, expires_at, key))
+            else:
+                g.cur.execute(
+                    f"UPDATE {config_name} SET latest_handshake = '(None)', status = '{status}' WHERE id='{key}'")
 
 
 def get_transfer(config_name):
@@ -240,39 +263,63 @@ def get_transfer(config_name):
     """
     # Get transfer
     try:
-        data_usage = subprocess.check_output(f"wg show {config_name} transfer",
-                                             shell=True, stderr=subprocess.STDOUT)
+        output = subprocess.check_output(f"wg show {config_name} transfer",
+                                         shell=True, stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError:
         return "stopped"
-    data_usage = data_usage.decode("UTF-8").split("\n")
-    final = []
-    for i in data_usage:
-        final.append(i.split("\t"))
-    data_usage = final
-    for i in range(len(data_usage)):
-        cur_i = g.cur.execute(
-            "SELECT total_receive, total_sent, cumu_receive, cumu_sent, status FROM %s WHERE id='%s'"
-            % (config_name, data_usage[i][0])).fetchall()
-        if len(cur_i) > 0:
-            total_sent = cur_i[0][1]
-            total_receive = cur_i[0][0]
-            cur_total_sent = round(int(data_usage[i][2]) / (1024 ** 3), 4)
-            cur_total_receive = round(int(data_usage[i][1]) / (1024 ** 3), 4)
-            if cur_i[0][4] == "running":
+
+    transfers = {}
+
+    for item in filter(bool, output.decode("UTF-8").split("\n")):
+        key, down, up = item.split("\t")
+        transfers[key] = {
+            "id": key,
+            "down": down,
+            "up": up
+        }
+
+    peers = g.cur.execute(
+        "SELECT total_receive, total_sent, cumu_receive, cumu_sent, status, volume, is_enabled, expires_at, id FROM %s" % (
+            config_name)).fetchall()
+
+    if len(peers) > 0:
+        for peer in peers:
+            (total_receive, total_sent, cumu_receive, cumu_sent, status, volume, is_enabled, expires_at, key) = peer
+            expires_at = expires_at or None
+            is_enabled = bool(True or is_enabled)
+            status = peer[4]
+
+            # peer_exists = key in transfers
+            transfer = transfers.get(key) or {}
+            cur_total_sent = round(int(transfer.get('up') or 0) / pow(1024, 3), 4)
+            cur_total_receive = round(int(transfer.get('down') or 0) / pow(1024, 3), 4)
+
+            if status == "running":
                 if total_sent <= cur_total_sent and total_receive <= cur_total_receive:
                     total_sent = cur_total_sent
                     total_receive = cur_total_receive
                 else:
-                    cumulative_receive = cur_i[0][2] + total_receive
-                    cumulative_sent = cur_i[0][3] + total_sent
+                    cumulative_receive = peer[2] + total_receive
+                    cumulative_sent = peer[3] + total_sent
                     g.cur.execute("UPDATE %s SET cumu_receive = %f, cumu_sent = %f, cumu_data = %f WHERE id = '%s'" %
                                   (config_name, round(cumulative_receive, 4), round(cumulative_sent, 4),
-                                   round(cumulative_sent + cumulative_receive, 4), data_usage[i][0]))
+                                   round(cumulative_sent + cumulative_receive, 4), key))
                     total_sent = 0
                     total_receive = 0
-                g.cur.execute("UPDATE %s SET total_receive = %f, total_sent = %f, total_data = %f WHERE id = '%s'" %
-                              (config_name, round(total_receive, 4), round(total_sent, 4),
-                               round(total_receive + total_sent, 4), data_usage[i][0]))
+
+                if is_enabled:
+                    is_enabled = ((expires_at is None or time.time() < int(expires_at)) and (
+                            volume == 0 or volume >= total_sent * pow(1024, 3)))
+
+                    if not is_enabled:
+                        subprocess.check_output(f"wg set {config_name} peer {key} remove", shell=True,
+                                                stderr=subprocess.STDOUT)
+                        status = "stopped"
+
+                g.cur.execute(
+                    "UPDATE %s SET total_receive = %f, total_sent = %f, total_data = %f, is_enabled=%d, status='%s' WHERE id = '%s'" %
+                    (config_name, round(total_receive, 4), round(total_sent, 4),
+                     round(total_receive + total_sent, 4), int(is_enabled), status, key))
 
 
 def get_endpoint(config_name):
@@ -293,7 +340,6 @@ def get_endpoint(config_name):
         g.cur.execute("UPDATE " + config_name + " SET endpoint = '%s' WHERE id = '%s'"
                       % (data_usage[count + 1], data_usage[count]))
         count += 2
-
 
 
 def get_allowed_ip(conf_peer_data, config_name):
@@ -343,7 +389,12 @@ def get_all_peers_data(config_name):
                     "mtu": config.get("Peers", "peer_mtu"),
                     "keepalive": config.get("Peers", "peer_keep_alive"),
                     "remote_endpoint": config.get("Peers", "remote_endpoint"),
-                    "preshared_key": ""
+                    "preshared_key": "",
+                    "is_enabled": 1,
+                    "expires_at": None,
+                    "volume": 0,
+                    "is_connected": 0,
+                    "created_at": time.time()
                 }
                 if "PresharedKey" in conf_peer_data['Peers'][i].keys():
                     new_data["preshared_key"] = conf_peer_data['Peers'][i]["PresharedKey"]
@@ -351,7 +402,7 @@ def get_all_peers_data(config_name):
                 INSERT INTO {config_name} 
                     VALUES (:id, :private_key, :DNS, :endpoint_allowed_ip, :name, :total_receive, :total_sent, 
                     :total_data, :endpoint, :status, :latest_handshake, :allowed_ip, :cumu_receive, :cumu_sent, 
-                    :cumu_data, :mtu, :keepalive, :remote_endpoint, :preshared_key);
+                    :cumu_data, :mtu, :keepalive, :remote_endpoint, :preshared_key, :is_enabled, :expires_at, :volume, :is_connected, :created_at);
                 """
                 g.cur.execute(sql, new_data)
         else:
@@ -364,14 +415,15 @@ def get_all_peers_data(config_name):
     wg_key = list(map(lambda a: a['PublicKey'], conf_peer_data['Peers']))
     for i in db_key:
         if i not in wg_key:
-            g.cur.execute("DELETE FROM %s WHERE id = '%s'" % (config_name, i))
+            g.cur.execute("UPDATE %s SET is_enabled=0 WHERE id='%s'" % (config_name, i))
+            # g.cur.execute("DELETE FROM %s WHERE id = '%s'")
     get_latest_handshake(config_name)
     get_transfer(config_name)
     get_endpoint(config_name)
     get_allowed_ip(conf_peer_data, config_name)
 
 
-def get_peers(config_name, search, sort_t):
+def get_peers(config_name, search="", sort_t="status"):
     """
     Get all peers.
     @param config_name: Name of WG interface
@@ -400,7 +452,16 @@ def get_peers(config_name, search, sort_t):
         result = sorted(result, key=lambda d: d[sort_t])
     toc = time.perf_counter()
     print(f"Finish fetching peers in {toc - tic:0.4f} seconds")
-    return result
+
+    def cast_data(item):
+        item.update({
+            "expires_at": datetime.fromtimestamp(item['expires_at']).isoformat() if item.get('expires_at') else None,
+            "is_enabled": bool(item['is_enabled']) if item.get('is_enabled') else False
+        })
+
+        return item
+
+    return list(map(cast_data, result))
 
 
 def get_conf_pub_key(config_name):
@@ -476,37 +537,60 @@ def get_conf_status(config_name):
     return "running" if config_name in ifconfig.keys() else "stopped"
 
 
+def get_config_names():
+    return map(lambda file: Path(file).stem, glob(WG_CONF_PATH + '/*.conf'))
+
+
 def get_conf_list():
     """Get all wireguard interfaces with status.
 
     @return: Return a list of dicts with interfaces and its statuses
     @rtype: list
     """
-
     conf = []
-    for i in os.listdir(WG_CONF_PATH):
-        if regex_match("^(.{1,}).(conf)$", i):
-            i = i.replace('.conf', '')
-            create_table = f"""
-                CREATE TABLE IF NOT EXISTS {i} (
-                    id VARCHAR NOT NULL, private_key VARCHAR NULL, DNS VARCHAR NULL, 
-                    endpoint_allowed_ip VARCHAR NULL, name VARCHAR NULL, total_receive FLOAT NULL, 
-                    total_sent FLOAT NULL, total_data FLOAT NULL, endpoint VARCHAR NULL, 
-                    status VARCHAR NULL, latest_handshake VARCHAR NULL, allowed_ip VARCHAR NULL, 
-                    cumu_receive FLOAT NULL, cumu_sent FLOAT NULL, cumu_data FLOAT NULL, mtu INT NULL, 
-                    keepalive INT NULL, remote_endpoint VARCHAR NULL, preshared_key VARCHAR NULL, 
-                    PRIMARY KEY (id)
-                )
-            """
-            g.cur.execute(create_table)
-            temp = {"conf": i, "status": get_conf_status(i), "public_key": get_conf_pub_key(i)}
-            if temp['status'] == "running":
-                temp['checked'] = 'checked'
-            else:
-                temp['checked'] = ""
-            conf.append(temp)
+
+    for name in get_config_names():
+        create_table = f"""
+                        CREATE TABLE IF NOT EXISTS {name} (
+                            id VARCHAR NOT NULL, 
+                            private_key VARCHAR NULL, 
+                            DNS VARCHAR NULL, 
+                            endpoint_allowed_ip VARCHAR NULL, 
+                            name VARCHAR NULL, 
+                            total_receive FLOAT NULL, 
+                            total_sent FLOAT NULL, 
+                            total_data FLOAT NULL, 
+                            endpoint VARCHAR NULL, 
+                            status VARCHAR NULL, 
+                            latest_handshake VARCHAR NULL, 
+                            allowed_ip VARCHAR NULL, 
+                            cumu_receive FLOAT NULL, 
+                            cumu_sent FLOAT NULL, 
+                            cumu_data FLOAT NULL, 
+                            mtu INT NULL, 
+                            keepalive INT NULL, 
+                            remote_endpoint VARCHAR NULL, 
+                            preshared_key VARCHAR NULL, 
+                            is_enabled TINYINT(1) DEFAULT 1,
+                            is_connected TINYTINT(1) DEFAULT 0,
+                            expires_at BIGINT(15) NULL,
+                            created_at BIGINT(15) NULL,
+                            volume BIGINT DEFAULT 0,
+                            PRIMARY KEY (id)
+                        )
+                    """
+        g.cur.execute(create_table)
+        temp = {"conf": name, "status": get_conf_status(name), "public_key": get_conf_pub_key(name)}
+
+        if temp['status'] == "running":
+            temp['checked'] = 'checked'
+        else:
+            temp['checked'] = ""
+        conf.append(temp)
+
     if len(conf) > 0:
         conf = sorted(conf, key=itemgetter('conf'))
+
     return conf
 
 
@@ -1127,7 +1211,8 @@ def add_peer_bulk(config_name):
         wg_command.append(keys[i]['allowed_ips'])
         update = ["UPDATE ", config_name, " SET name = '", keys[i]['name'],
                   "', private_key = '", keys[i]['privateKey'], "', DNS = '", dns_addresses,
-                  "', endpoint_allowed_ip = '", endpoint_allowed_ip, "' WHERE id = '", keys[i]['publicKey'], "'"]
+                  "', created_at = ", time.time(),
+                  ", endpoint_allowed_ip = '", endpoint_allowed_ip, "' WHERE id = '", keys[i]['publicKey'], "'"]
         sql_command.append(update)
     try:
         status = subprocess.check_output(" ".join(wg_command), shell=True, stderr=subprocess.STDOUT)
@@ -1158,6 +1243,9 @@ def add_peer(config_name):
     dns_addresses = data['DNS']
     enable_preshared_key = data["enable_preshared_key"]
     preshared_key = data['preshared_key']
+
+    expires_at = data['expires_at'] or None
+    volume = float(data['volume']) * pow(1024, 3) if data.get('volume') else 0
     keys = get_conf_peer_key(config_name)
     if len(public_key) == 0 or len(dns_addresses) == 0 or len(allowed_ips) == 0 or len(endpoint_allowed_ip) == 0:
         return "Please fill in all required box."
@@ -1194,8 +1282,10 @@ def add_peer(config_name):
                                              shell=True, stderr=subprocess.STDOUT)
         status = subprocess.check_output("wg-quick save " + config_name, shell=True, stderr=subprocess.STDOUT)
         get_all_peers_data(config_name)
-        sql = "UPDATE " + config_name + " SET name = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ? WHERE id = ?"
-        g.cur.execute(sql, (data['name'], data['private_key'], data['DNS'], endpoint_allowed_ip, public_key))
+        sql = "UPDATE " + config_name + " SET name = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ?, volume = ?, expires_at = ?, is_connected = ?, created_at = ? WHERE id = ?"
+        g.cur.execute(sql, (
+            data['name'], data['private_key'], data['DNS'], endpoint_allowed_ip, volume, expires_at, 0, time.time(),
+            public_key))
         return "true"
     except subprocess.CalledProcessError as exc:
         return exc.output.strip()
@@ -1252,13 +1342,24 @@ def save_peer_setting(config_name):
     data = request.get_json()
     id = data['id']
     name = data['name']
+    volume = float(data['volume']) * pow(1024, 3)
+    now = time.time()
+    expires_at = data['expires_at'] or None
+
     private_key = data['private_key']
     dns_addresses = data['DNS']
     allowed_ip = data['allowed_ip']
     endpoint_allowed_ip = data['endpoint_allowed_ip']
     preshared_key = data['preshared_key']
-    check_peer_exist = g.cur.execute("SELECT COUNT(*) FROM " + config_name + " WHERE id = ?", (id,)).fetchone()
-    if check_peer_exist[0] == 1:
+    peer = g.cur.execute(
+        "SELECT id, is_enabled, total_receive, total_sent, total_data FROM " + config_name + " WHERE id = ?",
+        (id,)).fetchone()
+    if peer:
+        (id, is_enabled, total_receive, total_sent, total_data) = peer
+
+        is_enabled = (expires_at is None or int(expires_at) > now) and (
+                volume == 0 or volume >= float(total_data) * pow(1024, 3))
+
         check_ip = check_repeat_allowed_ip(id, allowed_ip, config_name)
         if not check_IP_with_range(endpoint_allowed_ip):
             return jsonify({"status": "failed", "msg": "Endpoint Allowed IPs format is incorrect."})
@@ -1275,24 +1376,44 @@ def save_peer_setting(config_name):
         if check_ip['status'] == "failed":
             return jsonify(check_ip)
         try:
-            tmp_psk = open("tmp_edit_psk.txt", "w+")
-            tmp_psk.write(preshared_key)
-            tmp_psk.close()
-            change_psk = subprocess.check_output(f"wg set {config_name} peer {id} preshared-key tmp_edit_psk.txt",
-                                                 shell=True, stderr=subprocess.STDOUT)
-            if change_psk.decode("UTF-8") != "":
-                return jsonify({"status": "failed", "msg": change_psk.decode("UTF-8")})
-            if allowed_ip == "":
-                allowed_ip = '""'
-            allowed_ip = allowed_ip.replace(" ", "")
-            change_ip = subprocess.check_output(f"wg set {config_name} peer {id} allowed-ips {allowed_ip}",
-                                                shell=True, stderr=subprocess.STDOUT)
+            if is_enabled:
+                tmp_file = 'tmp_edit_psk.txt'
+                tmp_psk = open(tmp_file, "w+")
+                tmp_psk.write(preshared_key)
+                tmp_psk.close()
+
+                wg_cmd = ['wg', 'set', config_name, 'peer', id, 'preshared-key', tmp_file]
+
+                change_psk = subprocess.check_output(f"wg set {config_name} peer {id} preshared-key tmp_edit_psk.txt",
+                                                     shell=True, stderr=subprocess.STDOUT)
+                if change_psk.decode("UTF-8") != "":
+                    return jsonify({"status": "failed", "msg": change_psk.decode("UTF-8")})
+
+                if allowed_ip == "":
+                    allowed_ip = '""'
+
+                allowed_ip = allowed_ip.replace(" ", "")
+                wg_cmd.append('allowed-ips')
+                wg_cmd.append(allowed_ip)
+                output = subprocess.check_output(" ".join(wg_cmd), shell=True, stderr=subprocess.STDOUT)
+
+                if output.decode("UTF-8") != "":
+                    return jsonify({"status": "failed", "msg": output.decode("UTF-8")})
+            else:
+                output = subprocess.check_output(f"wg set {config_name} peer {id} remove", shell=True,
+                                                 stderr=subprocess.STDOUT).decode('UTF-8')
+
+                if output:
+                    return jsonify({"status": "failed", "msg": output})
+
             subprocess.check_output(f'wg-quick save {config_name}', shell=True, stderr=subprocess.STDOUT)
-            if change_ip.decode("UTF-8") != "":
-                return jsonify({"status": "failed", "msg": change_ip.decode("UTF-8")})
-            sql = "UPDATE " + config_name + " SET name = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ?, mtu = ?, keepalive = ?, preshared_key = ? WHERE id = ?"
-            g.cur.execute(sql, (name, private_key, dns_addresses, endpoint_allowed_ip, data["MTU"],
-                                data["keep_alive"], preshared_key, id))
+
+            sql = "UPDATE " + config_name + " SET name = ?, volume = ?, private_key = ?, DNS = ?, endpoint_allowed_ip = ?, mtu = ?, keepalive = ?, preshared_key = ?, is_enabled = ?, expires_at = ? WHERE id = ?"
+
+            g.cur.execute(sql, (name, volume, private_key, dns_addresses, endpoint_allowed_ip, data["MTU"],
+                                data["keep_alive"], preshared_key, int(is_enabled),
+                                expires_at, id))
+
             return jsonify({"status": "success", "msg": ""})
         except subprocess.CalledProcessError as exc:
             return jsonify({"status": "failed", "msg": str(exc.output.decode("UTF-8").strip())})
@@ -1314,11 +1435,14 @@ def get_peer_name(config_name):
     data = request.get_json()
     peer_id = data['id']
     result = g.cur.execute(
-        "SELECT name, allowed_ip, DNS, private_key, endpoint_allowed_ip, mtu, keepalive, preshared_key FROM "
+        "SELECT name, allowed_ip, DNS, private_key, endpoint_allowed_ip, mtu, keepalive, preshared_key, volume, expires_at, is_enabled FROM "
         + config_name + " WHERE id = ?", (peer_id,)).fetchall()
-    data = {"name": result[0][0], "allowed_ip": result[0][1], "DNS": result[0][2],
+    data = {"name": result[0][0], "volume": result[0][8], "is_enabled": bool(result[0][10]), "allowed_ip": result[0][1],
+            "DNS": result[0][2],
             "private_key": result[0][3], "endpoint_allowed_ip": result[0][4],
-            "mtu": result[0][5], "keep_alive": result[0][6], "preshared_key": result[0][7]}
+            "mtu": result[0][5], "keep_alive": result[0][6], "preshared_key": result[0][7],
+            "expires_at": datetime.fromtimestamp(result[0][9]).astimezone(pytz.timezone('Asia/Tehran')).isoformat() if
+            result[0][9] else None}
     return jsonify(data)
 
 
@@ -1656,7 +1780,7 @@ def check_update():
     """
     config = get_dashboard_conf()
     try:
-        data = urllib.request.urlopen("https://api.github.com/repos/donaldzou/WGDashboard/releases").read()
+        data = urllib.request.urlopen("https://api.github.com/repos/lorddeveloper/WGDashboard/releases").read()
         output = json.loads(data)
         release = []
         for i in output:
@@ -1708,6 +1832,24 @@ def get_host_bind():
 
 
 if __name__ == "__main__":
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+
+    def test():
+        with app.app_context():
+            if getattr(g, 'db', None) is None:
+                g.db = connect_db()
+                g.cur = g.db.cursor()
+
+            for name in get_config_names():
+                get_latest_handshake(name)
+                get_transfer(name)
+
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(test, seconds=10, trigger='interval')
+    scheduler.start()
+
     init_dashboard()
     UPDATE = check_update()
     config = configparser.ConfigParser(strict=False)
@@ -1718,4 +1860,4 @@ if __name__ == "__main__":
     app_port = config.get("Server", "app_port")
     WG_CONF_PATH = config.get("Server", "wg_conf_path")
     config.clear()
-    app.run(host=app_ip, debug=False, port=app_port)
+    app.run(host=app_ip, debug=True, port=app_port)
