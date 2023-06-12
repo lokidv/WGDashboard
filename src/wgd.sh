@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# wgd.sh - Copyright(C) 2021 Donald Zou [https://github.com/lorddeveloper]
+# wgd.sh - Copyright(C) 2021 Donald Zou [https://github.com/AmirOo0]
 # Under Apache-2.0 License
 app_name="dashboard.py"
 app_official_name="WGDashboard"
@@ -18,7 +18,7 @@ dashes='------------------------------------------------------------'
 equals='============================================================'
 help () {
   printf "=================================================================================\n"
-  printf "+          <WGDashboard> by Donald Zou - https://github.com/lorddeveloper           +\n"
+  printf "+          <WGDashboard> by Donald Zou - https://github.com/AmirOo0           +\n"
   printf "=================================================================================\n"
   printf "| Usage: ./wgd.sh <option>                                                      |\n"
   printf "|                                                                               |\n"
@@ -131,7 +131,7 @@ start_wgd_debug() {
 }
 
 update_wgd() {
-  new_ver=$(python3 -c "import json; import urllib.request; data = urllib.request.urlopen('https://api.github.com/repos/lorddeveloper/WGDashboard/releases/latest').read(); output = json.loads(data);print(output['tag_name'])")
+  new_ver=$(python3 -c "import json; import urllib.request; data = urllib.request.urlopen('https://api.github.com/repos/AmirOo0/WGDashboard/releases/latest').read(); output = json.loads(data);print(output['tag_name'])")
   printf "%s\n" "$dashes"
   printf "| Are you sure you want to update to the %s? (Y/N): " "$new_ver"
   read up
@@ -143,7 +143,7 @@ update_wgd() {
     mv wgd.sh wgd.sh.old
     printf "| Downloading %s from GitHub...                            |\n" "$new_ver"
     git stash > /dev/null 2>&1
-    git pull https://github.com/lorddeveloper/WGDashboard.git $new_ver --force >  /dev/null 2>&1
+    git pull https://github.com/AmirOo0/WGDashboard.git $new_ver --force >  /dev/null 2>&1
     printf "| Upgrading pip                                            |\n"
     python3 -m pip install -U pip > /dev/null 2>&1
     printf "| Installing latest Python dependencies                    |\n"

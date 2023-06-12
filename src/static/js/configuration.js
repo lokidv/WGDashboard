@@ -1,5 +1,5 @@
 /**
- * configuration.js - Copyright(C) 2021 Donald Zou [https://github.com/lorddeveloper]
+ * configuration.js - Copyright(C) 2021 Donald Zou [https://github.com/AmirOo0]
  * Under Apache-2.0 License
  */
 

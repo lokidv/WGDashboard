@@ -1,5 +1,5 @@
 """
-< WGDashboard > - Copyright(C) 2021 Donald Zou [https://github.com/lorddeveloper]
+< WGDashboard > - Copyright(C) 2021 Donald Zou [https://github.com/AmirOo0]
 Under Apache-2.0 License
 """
 
@@ -1780,7 +1780,7 @@ def check_update():
     """
     config = get_dashboard_conf()
     try:
-        data = urllib.request.urlopen("https://api.github.com/repos/lorddeveloper/WGDashboard/releases").read()
+        data = urllib.request.urlopen("https://api.github.com/repos/AmirOo0/WGDashboard/releases").read()
         output = json.loads(data)
         release = []
         for i in output:

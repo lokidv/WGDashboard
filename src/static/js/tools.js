@@ -1,5 +1,5 @@
 /**
- * tools.js - Copyright(C) 2021 Donald Zou [https://github.com/lorddeveloper]
+ * tools.js - Copyright(C) 2021 Donald Zou [https://github.com/AmirOo0]
  */
 
 $(".ip_dropdown").on("change", function () {
