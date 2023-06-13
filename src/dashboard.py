@@ -247,10 +247,10 @@ def get_latest_handshake(config_name):
                 is_connected = 1
 
             if handshake['time'] > 0:
-                g.cur.execute(
-                    f"update {config_name} set latest_handshake = '?', status = '?', is_connected = ?, expires_at = ? where id='?'",
-                    (
-                        str(diff).split('.', maxsplit=1)[0], status, is_connected, expires_at, key))
+                query = f"update {config_name} set latest_handshake = ?, status = ?, is_connected = ?, expires_at = ? where id=?"
+                bindings = (str(diff).split('.', maxsplit=1)[0], status, is_connected, expires_at, key)
+
+                g.cur.execute(query, bindings)
             else:
                 g.cur.execute(
                     f"UPDATE {config_name} SET latest_handshake = '(None)', status = '{status}' WHERE id='{key}'")
