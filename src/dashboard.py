@@ -17,6 +17,7 @@ import re
 import urllib.parse
 import urllib.request
 import urllib.error
+import zipfile
 from datetime import datetime, timedelta
 from glob import glob
 from operator import itemgetter
@@ -26,7 +27,7 @@ from threading import Thread
 # PIP installed library
 import ifcfg
 import pytz
-from flask import Flask, request, render_template, redirect, url_for, session, jsonify, g
+from flask import Flask, request, render_template, redirect, url_for, session, jsonify, g, send_file
 from flask_qrcode import QRcode
 from icmplib import ping, traceroute
 
@@ -43,8 +44,11 @@ WG_CONF_PATH = None
 # Dashboard Config Name
 configuration_path = os.getenv('CONFIGURATION_PATH', '.')
 DB_PATH = os.path.join(configuration_path, 'db')
+
 if not os.path.isdir(DB_PATH):
     os.mkdir(DB_PATH)
+
+DB_FILE_PATH = os.path.join(configuration_path, 'db', 'wgdashboard.db')
 DASHBOARD_CONF = os.path.join(configuration_path, 'wg-dashboard.ini')
 
 # Upgrade Required
@@ -67,7 +71,7 @@ def connect_db():
     Connect to the database
     @return: sqlite3.Connection
     """
-    return sqlite3.connect(os.path.join(configuration_path, 'db', 'wgdashboard.db'))
+    return sqlite3.connect(DB_FILE_PATH)
 
 
 def get_dashboard_conf():
@@ -1713,6 +1717,30 @@ def traceroute_ip():
         return jsonify(returnjson)
     except Exception:
         return "Error"
+
+
+@app.route('/backup', methods=['GET'])
+def backup():
+    files_to_zip = [os.path.abspath(i) for i in [
+        DB_FILE_PATH, DASHBOARD_CONF
+    ]]
+
+    conf_files_path = WG_CONF_PATH
+    conf_files_to_zip = [os.path.join(conf_files_path, f) for f in os.listdir(conf_files_path) if f.endswith('.conf')]
+    files_to_zip.extend(conf_files_to_zip)
+
+    now = datetime.now()
+    zip_file_name = now.strftime("%Y-%m-%d%H%M%S") + '.zip'
+
+    with zipfile.ZipFile(zip_file_name, 'w') as myzip:
+        for file in files_to_zip:
+            myzip.write(file)
+
+    response = send_file(zip_file_name, as_attachment=True)
+
+    os.remove(zip_file_name)
+
+    return response
 
 
 """
